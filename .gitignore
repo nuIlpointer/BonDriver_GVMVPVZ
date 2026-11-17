@@ -1,0 +1,25 @@
+# Build intermediates
+build/
+.vs/
+*.obj
+*.pdb
+*.ipdb
+*.iobj
+*.lib
+*.exp
+*.ilk
+*.idb
+*.tlog
+*.log
+*.bak
+
+# Proprietary firmware, drivers, captures, and recordings (NEVER commit)
+*.bin
+*.sys
+*.ax
+*.ts
+*.mp4
+*.pcap
+*.pcapng
+*.7z
+libusb0.dll

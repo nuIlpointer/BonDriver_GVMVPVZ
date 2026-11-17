@@ -1,0 +1,6 @@
+- name: GV-MVP-VZ
+  types:
+    - GR
+  command: C:\DTV\BonRecTest\x64\BonRecTest.exe --driver C:\DTV\BonDriver\BonDriver_GVMVPVZ_T.dll --space 0 --channel <channel> --output -
+  decoder: ~
+  isDisabled: false

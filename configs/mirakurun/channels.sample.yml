@@ -1,0 +1,33 @@
+# Sample GR channels for Tokyo Skytree (Space 0 UHF numbering: 0=13ch, 3=16ch, ..., 14=27ch)
+# Adjust channel numbers (physical UHF ch - 13) for your broadcast region.
+- name: MX
+  type: GR
+  channel: '3'
+
+- name: CX
+  type: GR
+  channel: '8'
+
+- name: TBS
+  type: GR
+  channel: '9'
+
+- name: TX
+  type: GR
+  channel: '10'
+
+- name: EX
+  type: GR
+  channel: '11'
+
+- name: NTV
+  type: GR
+  channel: '12'
+
+- name: NHK E
+  type: GR
+  channel: '13'
+
+- name: NHK G
+  type: GR
+  channel: '14'
