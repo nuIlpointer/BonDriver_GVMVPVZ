@@ -1,4 +1,4 @@
-#define UNICODE
+﻿#define UNICODE
 #define _UNICODE
 #define _CRT_SECURE_NO_WARNINGS
 #define WIN32_LEAN_AND_MEAN
@@ -139,6 +139,7 @@ struct LibusbApi {
     pfn_usb_bulk_setup_async usb_bulk_setup_async = nullptr;
     pfn_usb_submit_async usb_submit_async = nullptr;
     pfn_usb_reap_async usb_reap_async = nullptr;
+    pfn_usb_reap_async usb_reap_async_nocancel = nullptr;
     pfn_usb_cancel_async usb_cancel_async = nullptr;
     pfn_usb_free_async usb_free_async = nullptr;
     pfn_usb_clear_halt usb_clear_halt = nullptr;
@@ -166,6 +167,7 @@ struct LibusbApi {
         usb_bulk_setup_async = (pfn_usb_bulk_setup_async)GetProcAddress(mod, "usb_bulk_setup_async");
         usb_submit_async = (pfn_usb_submit_async)GetProcAddress(mod, "usb_submit_async");
         usb_reap_async = (pfn_usb_reap_async)GetProcAddress(mod, "usb_reap_async");
+        usb_reap_async_nocancel = (pfn_usb_reap_async)GetProcAddress(mod, "usb_reap_async_nocancel");
         usb_cancel_async = (pfn_usb_cancel_async)GetProcAddress(mod, "usb_cancel_async");
         usb_free_async = (pfn_usb_free_async)GetProcAddress(mod, "usb_free_async");
         usb_clear_halt = (pfn_usb_clear_halt)GetProcAddress(mod, "usb_clear_halt");
@@ -324,6 +326,58 @@ struct AesCbcCtx {
     }
 };
 
+struct IsdbsChannelDef {
+    const wchar_t* name;
+    uint32_t freqKhz;
+    uint16_t tsid;
+};
+
+static const IsdbsChannelDef BS_CHANNELS[] = {
+    { L"BS1/TS0",  11727480, 0x4010 }, // BS Asahi
+    { L"BS1/TS1",  11727480, 0x4011 }, // BS-TBS
+    { L"BS1/TS2",  11727480, 0x4012 }, // BS TV Tokyo
+    { L"BS3/TS0",  11765840, 0x4030 }, // WOWOW Prime
+    { L"BS3/TS1",  11765840, 0x4031 }, // BS TV Tokyo (alt)
+    { L"BS3/TS2",  11765840, 0x4032 }, // BS10
+    { L"BS5/TS0",  11804200, 0x4450 }, // WOWOW Live
+    { L"BS5/TS1",  11804200, 0x4451 }, // WOWOW Cinema
+    { L"BS9/TS0",  11880920, 0x4090 }, // BS11
+    { L"BS9/TS1",  11880920, 0x4091 }, // Star Channel
+    { L"BS9/TS2",  11880920, 0x4092 }, // BS12 TwellV
+    { L"BS11/TS0", 11919280, 0x46B0 }, // BS Shochiku Tokyu
+    { L"BS11/TS1", 11919280, 0x46B1 }, // BS Yoshimoto
+    { L"BS11/TS2", 11919280, 0x46B2 }, // Open Univ
+    { L"BS13/TS0", 11957640, 0x40D0 }, // BS NTV
+    { L"BS13/TS1", 11957640, 0x40D1 }, // BS Fuji
+    { L"BS15/TS1", 11996000, 0x40F1 }, // NHK BS
+    { L"BS15/TS2", 11996000, 0x40F2 }, // NHK BS (sub)
+    { L"BS19/TS0", 12072720, 0x4730 }, // J SPORTS 4
+    { L"BS19/TS1", 12072720, 0x4731 }, // J SPORTS 1
+    { L"BS19/TS2", 12072720, 0x4732 }, // J SPORTS 2
+    { L"BS19/TS3", 12072720, 0x4733 }, // J SPORTS 3
+    { L"BS21/TS0", 12111080, 0x4750 }, // WOWOW Plus
+    { L"BS21/TS1", 12111080, 0x4751 }, // Nihon Eiga
+    { L"BS21/TS2", 12111080, 0x4752 }, // Green Channel
+    { L"BS23/TS0", 12149440, 0x4770 }, // BS Animax
+    { L"BS23/TS1", 12149440, 0x4771 }, // Disney Ch
+    { L"BS23/TS2", 12149440, 0x4772 }, // BS Tsuri / J:COM BS
+};
+
+static const IsdbsChannelDef CS_CHANNELS[] = {
+    { L"ND2",  12291000, 0x6020 },
+    { L"ND4",  12331000, 0x7040 },
+    { L"ND6",  12371000, 0x7060 },
+    { L"ND8",  12411000, 0x6080 },
+    { L"ND10", 12451000, 0x60A0 },
+    { L"ND12", 12491000, 0x70C0 },
+    { L"ND14", 12531000, 0x70E0 },
+    { L"ND16", 12571000, 0x7100 },
+    { L"ND18", 12611000, 0x7120 },
+    { L"ND20", 12651000, 0x7140 },
+    { L"ND22", 12691000, 0x7160 },
+    { L"ND24", 12731000, 0x7180 },
+};
+
 // ============================================================================
 // BonDriver_GVMVPVZ_T Implementation
 // ============================================================================
@@ -332,7 +386,9 @@ public:
     CBonDriverGVMVPVZ() {
         InitializeCriticalSection(&m_cmdCs);
         InitializeCriticalSection(&m_bufCs);
+        InitializeCriticalSection(&m_rawCs);
         m_hStreamEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        m_hRawEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         m_hWdStopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         wchar_t dbgBuf[16] = {};
         m_debug = (GetEnvironmentVariableW(L"GVMVPVZ_DEBUG", dbgBuf, 16) > 0 && dbgBuf[0] != L'0');
@@ -344,34 +400,95 @@ public:
     ~CBonDriverGVMVPVZ() {
         CloseTuner();
         if (m_hWdStopEvent) CloseHandle(m_hWdStopEvent);
+        if (m_hRawEvent) CloseHandle(m_hRawEvent);
         if (m_hStreamEvent) CloseHandle(m_hStreamEvent);
+        DeleteCriticalSection(&m_rawCs);
         DeleteCriticalSection(&m_bufCs);
         DeleteCriticalSection(&m_cmdCs);
     }
 
     // --- IBonDriver ---
+    bool SoftwareResetDevice() {
+        // Use libusbK.dll UsbK_ResetDevice (libusb0's usb_reset_ex returns -5 on libusbK.sys)
+        HMODULE hk = LoadLibraryA("libusbK.dll");
+        if (hk) {
+            typedef BOOL (*PFN_LstK_Init)(void**, int);
+            typedef BOOL (*PFN_LstK_Free)(void*);
+            typedef BOOL (*PFN_LstK_FindByVidPid)(void*, int, int, void**);
+            typedef BOOL (*PFN_UsbK_Init)(void**, void*);
+            typedef BOOL (*PFN_UsbK_Free)(void*);
+            typedef BOOL (*PFN_UsbK_ResetDevice)(void*);
+            auto pLstInit = (PFN_LstK_Init)GetProcAddress(hk, "LstK_Init");
+            auto pLstFree = (PFN_LstK_Free)GetProcAddress(hk, "LstK_Free");
+            auto pLstFind = (PFN_LstK_FindByVidPid)GetProcAddress(hk, "LstK_FindByVidPid");
+            auto pUsbInit = (PFN_UsbK_Init)GetProcAddress(hk, "UsbK_Init");
+            auto pUsbFree = (PFN_UsbK_Free)GetProcAddress(hk, "UsbK_Free");
+            auto pUsbReset = (PFN_UsbK_ResetDevice)GetProcAddress(hk, "UsbK_ResetDevice");
+            if (pLstInit && pLstFree && pLstFind && pUsbInit && pUsbFree && pUsbReset) {
+                void* lst = nullptr;
+                if (pLstInit(&lst, 0) && lst) {
+                    void* devInfo = nullptr;
+                    if (pLstFind(lst, 0x04BB, 0x052B, &devInfo) && devInfo) {
+                        void* usb = nullptr;
+                        if (pUsbInit(&usb, devInfo) && usb) {
+                            BOOL ok = pUsbReset(usb);
+                            if (m_debug) { fprintf(stderr, "[VZ] SoftwareResetDevice UsbK_ResetDevice=%d\n", ok); fflush(stderr); }
+                            pUsbFree(usb);
+                        }
+                    }
+                    pLstFree(lst);
+                }
+            }
+            FreeLibrary(hk);
+        }
+        Sleep(800);
+        uint16_t bcd = 0;
+        struct usb_device* dev = FindVZ(&bcd);
+        if (!dev) return false;
+        if (bcd != 0x0100) {
+            if (!BootFirmware()) return false;
+            dev = FindVZ(&bcd);
+            if (!dev || bcd != 0x0100) return false;
+        }
+        return true;
+    }
+
     const BOOL OpenTuner(void) override {
         if (m_bOpen) return TRUE;
         if (!g_usb.EnsureLoaded()) return FALSE;
 
+        for (int attempt = 0; attempt < 2; attempt++) {
+            if (TryOpenTunerOnce(attempt > 0)) return TRUE;
+            CloseTunerInternal();
+            if (attempt == 0) {
+                if (m_debug) { fprintf(stderr, "[VZ] OpenTuner failed; attempting automatic usb_reset_ex(1) + cold re-init...\n"); fflush(stderr); }
+                if (!SoftwareResetDevice()) break;
+            }
+        }
+        return FALSE;
+    }
+
+    bool TryOpenTunerOnce(bool forceColdInit = false) {
         uint16_t bcd = 0;
         struct usb_device* dev = FindVZ(&bcd);
-        if (!dev) return FALSE;
+        if (!dev) return false;
 
         if (bcd != 0x0100) {
-            if (!BootFirmware()) return FALSE;
+            if (!BootFirmware()) return false;
             dev = FindVZ(&bcd);
-            if (!dev || bcd != 0x0100) return FALSE;
+            if (!dev || bcd != 0x0100) return false;
         }
 
         m_hCtrl = g_usb.usb_open(dev);
-        if (!m_hCtrl) return FALSE;
+        if (!m_hCtrl) return false;
         g_usb.usb_set_configuration(m_hCtrl, 1);
         if (g_usb.usb_claim_interface(m_hCtrl, 0) < 0) {
             g_usb.usb_close(m_hCtrl);
             m_hCtrl = nullptr;
-            return FALSE;
+            return false;
         }
+        g_usb.usb_clear_halt(m_hCtrl, 0x81);
+        g_usb.usb_clear_halt(m_hCtrl, 0x01);
 
         // Drain stale EP81 packets
         {
@@ -384,7 +501,7 @@ public:
         m_hStream = g_usb.usb_open(dev);
         if (!m_hStream || g_usb.usb_claim_interface(m_hStream, 2) < 0) {
             CloseTunerInternal();
-            return FALSE;
+            return false;
         }
 
         // Recover gracefully ONLY if a previous process exited while Unit8 RUN was active
@@ -407,15 +524,25 @@ public:
             }
         }
 
-        // GPIO reset + SONYLJxxx demod/tuner full init + B-CAS INT ONLY on cold boot (demod reg 0x0F != 0x34).
+        // Probe EP01/EP81 responsiveness before full init
+        {
+            uint32_t cardSt = 0;
+            if (!SendCommand11(9, 1, 31, &cardSt, 4)) {
+                if (m_debug) { fprintf(stderr, "[VZ] EP81 unresponsive on probe\n"); fflush(stderr); }
+                return false;
+            }
+        }
+
+        // GPIO reset + SONYLJxxx demod/tuner full init + B-CAS INT ONLY on cold boot (demod reg 0x0F != 0x34 and != 0x1C).
+        // Note: reg 0x0F is 0x34 in ISDB-T mode and 0x1C in ISDB-S mode!
         // Re-sending B-CAS INT (u=9 cs=34) on a warm reopen after hardware CAS streaming stalls unit=9!
         uint8_t demodCheck = ReadDemod(0x0F);
-        if (m_debug) { fprintf(stderr, "[VZ] Cold-check demod reg0F=0x%02X\n", demodCheck); fflush(stderr); }
-        if (demodCheck != 0x34) {
+        if (m_debug) { fprintf(stderr, "[VZ] Cold-check demod reg0F=0x%02X force=%d\n", demodCheck, forceColdInit ? 1 : 0); fflush(stderr); }
+        if (forceColdInit || (demodCheck != 0x34 && demodCheck != 0x1C)) {
             if (m_debug) { fprintf(stderr, "[VZ] InitHardware (cold boot)...\n"); fflush(stderr); }
             if (!InitHardware()) {
                 CloseTunerInternal();
-                return FALSE;
+                return false;
             }
             if (m_debug) { fprintf(stderr, "[VZ] InitInternalBcas (cold boot)...\n"); fflush(stderr); }
             InitInternalBcas();
@@ -440,7 +567,7 @@ public:
         if (!m_ivdrmOk) {
             if (m_debug) { fprintf(stderr, "[VZ] RunIvdrmAuth FAILED\n"); fflush(stderr); }
             CloseTunerInternal();
-            return FALSE;
+            return false;
         }
 
         m_wdCounter = 1;
@@ -451,11 +578,13 @@ public:
         if (m_debug) { fprintf(stderr, "[VZ] OpenTuner OK\n"); fflush(stderr); }
 
         m_bOpen = true;
+        m_isdbsInitDone = false;
+        m_isdbsMode = 0; // PrepareStreamAndTuner() configured ISDB-T
         m_curSpace = 0;
         m_curChannel = 0xFFFFFFFF;
         m_lastSignalDb = 0.0f;
         m_lastSignalTick = 0;
-        return TRUE;
+        return true;
     }
 
     void CloseTuner(void) override {
@@ -477,27 +606,32 @@ public:
         if (now - m_lastSignalTick < 500) return m_lastSignalDb;
         m_lastSignalTick = now;
 
-        uint8_t s80 = ReadDemod(0x80);
-        uint8_t sb0 = ReadDemod(0xB0);
-        if ((s80 & 0x3F) != 0 || (sb0 & 0x0F) < 8) {
-            m_lastSignalDb = 0.0f;
-            return 0.0f;
-        }
-        // Read 3-byte CN monitor from demod reg 0x8B (matches PhilMAS64 GetIsdbtSignalStrength)
-        uint8_t cn[3] = {};
-        if (I2CReadRegs(5, 0x8B, cn, 3)) {
-            uint32_t raw = ((uint32_t)cn[0] << 16) | ((uint32_t)cn[1] << 8) | cn[2];
-            // Approximate dB mapping for SONY demod CN register (typical good reception ~24-30 dB)
-            if (raw > 0) {
-                float db = 32.0f - (float)raw / 2000.0f;
-                if (db < 5.0f) db = 5.0f;
-                if (db > 35.0f) db = 35.0f;
-                m_lastSignalDb = db;
-                return m_lastSignalDb;
+        if (m_curSpace == 0) {
+            uint8_t s80 = ReadDemod(0x80);
+            uint8_t sb0 = ReadDemod(0xB0);
+            if ((s80 & 0x3F) != 0 || (sb0 & 0x0F) < 8) {
+                m_lastSignalDb = 0.0f;
+                return 0.0f;
             }
+            // Read 3-byte CN monitor from demod reg 0x8B (matches PhilMAS64 GetIsdbtSignalStrength)
+            uint8_t cn[3] = {};
+            if (I2CReadRegs(5, 0x8B, cn, 3)) {
+                uint32_t raw = ((uint32_t)cn[0] << 16) | ((uint32_t)cn[1] << 8) | cn[2];
+                if (raw > 0) {
+                    float db = 32.0f - (float)raw / 2000.0f;
+                    if (db < 5.0f) db = 5.0f;
+                    if (db > 35.0f) db = 35.0f;
+                    m_lastSignalDb = db;
+                    return m_lastSignalDb;
+                }
+            }
+            m_lastSignalDb = 25.0f;
+            return m_lastSignalDb;
+        } else {
+            uint8_t sc3 = ReadDemod4(0xC3);
+            m_lastSignalDb = ((sc3 & 0x10) == 0) ? 25.0f : 0.0f;
+            return m_lastSignalDb;
         }
-        m_lastSignalDb = 25.0f;
-        return m_lastSignalDb;
     }
 
     const DWORD WaitTsStream(const DWORD dwTimeOut = 0) override {
@@ -560,7 +694,7 @@ public:
 
     // --- IBonDriver2 ---
     LPCTSTR GetTunerName(void) override {
-        return L"I-O DATA GV-MVP/VZ (ISDB-T)";
+        return L"GVMVPVZ";
     }
 
     const BOOL IsTunerOpening(void) override {
@@ -568,91 +702,108 @@ public:
     }
 
     LPCTSTR EnumTuningSpace(const DWORD dwSpace) override {
-        return (dwSpace == 0) ? L"UHF" : nullptr;
+        if (dwSpace == 0) return L"UHF";
+        if (dwSpace == 1) return L"BS";
+        if (dwSpace == 2) return L"CS110";
+        return nullptr;
     }
 
     LPCTSTR EnumChannelName(const DWORD dwSpace, const DWORD dwChannel) override {
-        if (dwSpace != 0 || dwChannel >= NUM_CHANNELS) return nullptr;
-        return m_chNames[dwChannel];
+        if (dwSpace == 0 && dwChannel < NUM_CHANNELS) return m_chNames[dwChannel];
+        if (dwSpace == 1 && dwChannel < _countof(BS_CHANNELS)) return BS_CHANNELS[dwChannel].name;
+        if (dwSpace == 2 && dwChannel < _countof(CS_CHANNELS)) return CS_CHANNELS[dwChannel].name;
+        return nullptr;
     }
 
     const BOOL SetChannel(const DWORD dwSpace, const DWORD dwChannel) override {
-        if (!m_bOpen || dwSpace != 0 || dwChannel >= NUM_CHANNELS) return FALSE;
+        if (!m_bOpen) return FALSE;
+        bool valid = (dwSpace == 0 && dwChannel < NUM_CHANNELS) ||
+                     (dwSpace == 1 && dwChannel < _countof(BS_CHANNELS)) ||
+                     (dwSpace == 2 && dwChannel < _countof(CS_CHANNELS));
+        if (!valid) return FALSE;
 
-        // On in-process channel switch, run the exact same clean teardown + warm re-acquire sequence
-        // proven across separate process restarts (StopStreaming while EP83 drains -> CloseSession -> Prepare -> Auth -> WatchDog).
-        if (m_streaming) {
-            if (m_debug) { fprintf(stderr, "[VZ] In-process switch: teardown & warm re-acquire...\n"); fflush(stderr); }
-            StopStreaming();
-            if (m_hWdThread) {
-                InterlockedExchange(&m_wdStop, 1);
-                if (m_hWdStopEvent) SetEvent(m_hWdStopEvent);
-                WaitForSingleObject(m_hWdThread, 3000);
-                CloseHandle(m_hWdThread);
-                m_hWdThread = nullptr;
-            }
-            if (m_ivdrmOk && m_hCtrl) {
-                uint8_t closeBuf[9] = {};
-                *(uint32_t*)(closeBuf + 1) = m_activeSid;
-                SendCommand11(9, 1, 5, closeBuf, 9);
-                m_ivdrmOk = false;
-            }
-            PrepareStreamAndTuner();
-            m_ivdrmOk = RunIvdrmAuth(m_activeSid, m_sessionKey);
-            if (!m_ivdrmOk) {
-                if (m_debug) { fprintf(stderr, "[VZ] Re-auth failed on switch\n"); fflush(stderr); }
+        // On in-process channel switch: perform clean CloseTuner + warm OpenTuner (takes <300ms and resets USB handles cleanly).
+        if (m_streaming || m_curChannel != 0xFFFFFFFF) {
+            if (m_debug) { fprintf(stderr, "[VZ] In-process switch: clean warm Close+Open...\n"); fflush(stderr); }
+            CloseTuner();
+            if (!OpenTuner()) {
+                if (m_debug) { fprintf(stderr, "[VZ] Re-OpenTuner failed on switch\n"); fflush(stderr); }
                 return FALSE;
             }
-            m_wdCounter = 1;
-            RunWatchDogInitAndKick();
-            InterlockedExchange(&m_wdStop, 0);
-            if (m_hWdStopEvent) ResetEvent(m_hWdStopEvent);
-            m_hWdThread = CreateThread(nullptr, 0, WatchDogThreadProc, this, 0, nullptr);
+        }
+        {
+            EnterCriticalSection(&m_rawCs);
+            m_rawQueue.clear();
+            LeaveCriticalSection(&m_rawCs);
+            if (m_hRawEvent) ResetEvent(m_hRawEvent);
         }
         PurgeTsStream();
 
-        // Exact SonyLJxxx ISDB-T PLL formula from PhilMAS64 @ 0xce7b7..0xce874
-        uint32_t khz = 473143u + (uint32_t)dwChannel * 6000u;
-        uint32_t pll = (uint32_t)(((uint64_t)khz * 64ULL + 500ULL) / 1000ULL);
-        WriteDemod(0x25, 0x00);
-        WriteDemod(0x23, 0x4D);
-        WriteTuner5(0x11, 0x00);
-        WriteTuner5(0x13, 0x15);
-        WriteTuner5(0x14, (uint8_t)(pll & 0xFF));
-        WriteTuner5(0x15, (uint8_t)((pll >> 8) & 0xFF));
-        WriteTuner5(0x11, 0x02);
-        WriteDemod(0x01, 0x40);
-        WriteDemod(0x23, 0x4C);
-
-        // Wait for ISDB-T demod lock (up to 2.5s)
         bool locked = false;
-        uint8_t last80 = 0xFF, lastB0 = 0x00;
-        for (int p = 0; p < 25; p++) {
-            Sleep(100);
-            last80 = ReadDemod(0x80);
-            lastB0 = ReadDemod(0xB0);
-            if ((last80 & 0x3F) == 0 && (lastB0 & 0x0F) >= 8) {
-                locked = true;
-                break;
-            }
-        }
-        if (m_debug) { fprintf(stderr, "[VZ] Tune ch=%lu (%u kHz) locked=%d reg80=0x%02X regB0=0x%02X\n", dwChannel, khz, locked ? 1 : 0, last80, lastB0); fflush(stderr); }
+        if (dwSpace == 0) {
+            // Switch to ISDB-T (terrestrial) mode
+            EnableISDBS(false);
 
-        // Start EP83 async reader BEFORE Unit8 RUN so DMA never stalls
+            // Exact SonyLJxxx ISDB-T PLL formula from PhilMAS64 @ 0xce7b7..0xce874
+            uint32_t khz = 473143u + (uint32_t)dwChannel * 6000u;
+            uint32_t pll = (uint32_t)(((uint64_t)khz * 64ULL + 500ULL) / 1000ULL);
+            WriteDemod(0x25, 0x00);
+            WriteDemod(0x23, 0x4D);
+            WriteTuner5(0x11, 0x00);
+            WriteTuner5(0x13, 0x15);
+            WriteTuner5(0x14, (uint8_t)(pll & 0xFF));
+            WriteTuner5(0x15, (uint8_t)((pll >> 8) & 0xFF));
+            WriteTuner5(0x11, 0x02);
+            WriteDemod(0x01, 0x40);
+            WriteDemod(0x23, 0x4C);
+
+            uint8_t last80 = 0xFF, lastB0 = 0x00;
+            for (int p = 0; p < 25; p++) {
+                Sleep(100);
+                last80 = ReadDemod(0x80);
+                lastB0 = ReadDemod(0xB0);
+                if ((last80 & 0x3F) == 0 && (lastB0 & 0x0F) >= 8) {
+                    locked = true;
+                    break;
+                }
+            }
+            if (m_debug) { fprintf(stderr, "[VZ] Tune ISDB-T ch=%lu (%u kHz) locked=%d reg80=0x%02X regB0=0x%02X\n", dwChannel, khz, locked ? 1 : 0, last80, lastB0); fflush(stderr); }
+        } else {
+            // Switch to ISDB-S (BS / CS110) mode
+            if (!m_isdbsInitDone) {
+                InitIsdbsDemod();
+                InitIsdbsTuner();
+                m_isdbsInitDone = true;
+            }
+            EnableISDBS(true);
+
+            const IsdbsChannelDef& chDef = (dwSpace == 1) ? BS_CHANNELS[dwChannel] : CS_CHANNELS[dwChannel];
+            SetIsdbsFrequency(chDef.freqKhz, chDef.tsid);
+
+            uint8_t lastC3 = 0xFF;
+            for (int p = 0; p < 8; p++) {
+                Sleep(100);
+                lastC3 = ReadDemod4(0xC3);
+                if ((lastC3 & 0x10) == 0) {
+                    locked = true;
+                    break;
+                }
+            }
+            if (m_debug) { fprintf(stderr, "[VZ] Tune ISDB-S sp=%lu ch=%lu (%ls %u kHz tsid=0x%04X) locked=%d regC3=0x%02X\n", dwSpace, dwChannel, chDef.name, chDef.freqKhz, chDef.tsid, locked ? 1 : 0, lastC3); fflush(stderr); }
+        }
+
         InterlockedExchange(&m_readerStop, 0);
+        InterlockedIncrement(&m_sessionKeyGen);
+        m_hDecryptThread = CreateThread(nullptr, 0, DecryptThreadProc, this, 0, nullptr);
         m_hReaderThread = CreateThread(nullptr, 0, ReaderThreadProc, this, 0, nullptr);
+        if (m_hReaderThread) SetThreadPriority(m_hReaderThread, THREAD_PRIORITY_HIGHEST);
         Sleep(40);
 
         uint8_t runVal = 3;
         bool runOk = SendCommand11(8, 1, 3, &runVal, 1);
         if (m_debug) { fprintf(stderr, "[VZ] Unit8 RUN ok=%d\n", runOk ? 1 : 0); fflush(stderr); }
         if (!runOk) {
-            InterlockedExchange(&m_readerStop, 1);
-            if (m_hReaderThread) {
-                WaitForSingleObject(m_hReaderThread, 3000);
-                CloseHandle(m_hReaderThread);
-                m_hReaderThread = nullptr;
-            }
+            StopStreaming();
             return FALSE;
         }
         m_streaming = true;
@@ -677,7 +828,9 @@ private:
 
     CRITICAL_SECTION m_cmdCs;
     CRITICAL_SECTION m_bufCs;
+    CRITICAL_SECTION m_rawCs;
     HANDLE m_hStreamEvent = nullptr;
+    HANDLE m_hRawEvent = nullptr;
 
     usb_dev_handle* m_hCtrl = nullptr;
     usb_dev_handle* m_hStream = nullptr;
@@ -685,6 +838,8 @@ private:
     bool m_streaming = false;
     bool m_ivdrmOk = false;
     bool m_debug = false;
+    bool m_isdbsInitDone = false;
+    int m_isdbsMode = -1; // -1=unknown, 0=ISDB-T, 1=ISDB-S
     uint32_t m_activeSid = 0;
     uint8_t m_sessionKey[16] = {};
     uint64_t m_wdCounter = 1;
@@ -696,7 +851,10 @@ private:
     volatile LONG m_wdStop = 0;
 
     HANDLE m_hReaderThread = nullptr;
+    HANDLE m_hDecryptThread = nullptr;
     volatile LONG m_readerStop = 0;
+    volatile LONG m_acceptTs = 0;
+    volatile LONG m_sessionKeyGen = 0;
 
     DWORD m_curSpace = 0;
     DWORD m_curChannel = 0xFFFFFFFF;
@@ -704,6 +862,7 @@ private:
     ULONGLONG m_lastSignalTick = 0;
 
     wchar_t m_chNames[NUM_CHANNELS][16] = {};
+    std::deque<std::vector<uint8_t>> m_rawQueue;
     std::deque<std::vector<uint8_t>> m_tsQueue;
     std::vector<uint8_t> m_lastChunk;
 
@@ -722,12 +881,6 @@ private:
     }
 
     static bool ResolveFirmwarePath(std::wstring& outPath) {
-        wchar_t envPath[MAX_PATH] = {};
-        if (GetEnvironmentVariableW(L"GVMVPVZ_FW_PATH", envPath, MAX_PATH) > 0 &&
-            GetFileAttributesW(envPath) != INVALID_FILE_ATTRIBUTES) {
-            outPath = envPath;
-            return true;
-        }
         wchar_t dllPath[MAX_PATH] = {};
         if (GetModuleFileNameW(g_hModule, dllPath, MAX_PATH) > 0) {
             wchar_t* slash = wcsrchr(dllPath, L'\\');
@@ -739,10 +892,14 @@ private:
                 }
             }
         }
-        const wchar_t* fallback = L"C:\\DTV\\BonDriver\\NXP7164F_052B04BB.bin";
-        if (GetFileAttributesW(fallback) != INVALID_FILE_ATTRIBUTES) {
-            outPath = fallback;
-            return true;
+        const wchar_t* fallbacks[] = {
+            L"C:\\DTV\\BonDriver\\NXP7164F_052B04BB.bin",
+        };
+        for (auto p : fallbacks) {
+            if (GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES) {
+                outPath = p;
+                return true;
+            }
         }
         return false;
     }
@@ -940,8 +1097,96 @@ private:
     void WriteDemod(uint8_t reg, uint8_t val) { I2CWrite(5, reg, &val, 1); }
     uint8_t ReadDemod(uint8_t reg) { uint8_t v = 0; I2CReadRegs(5, reg, &v, 1); return v; }
     void WriteTuner5(uint8_t reg, uint8_t val) { uint8_t d[3] = { 0xC0, reg, val }; I2CWrite(5, 0xFE, d, 3); }
+    void WriteDemod4(uint8_t reg, uint8_t val) { I2CWrite(4, reg, &val, 1); }
+    uint8_t ReadDemod4(uint8_t reg) { uint8_t v = 0; I2CReadRegs(4, reg, &v, 1); return v; }
+    void WriteTuner4(uint8_t reg, uint8_t val) { uint8_t d[3] = { 0xC0, reg, val }; I2CWrite(4, 0xFE, d, 3); }
     void WriteUnit4_2(uint8_t reg, uint8_t val) { I2CWrite(4, reg, &val, 1); }
     void WriteUnit4_Tuner(const uint8_t* data, int len) { I2CWrite(4, data[0], data + 1, len - 1); }
+
+    void InitIsdbsDemod() {
+        const uint8_t seq[][2] = {
+            {0x01,0x90},{0x03,0x00},{0x04,0x02},{0x06,0x40},{0x07,0x41},{0x08,0x00},{0x09,0x00},{0x0a,0xff},
+            {0x0c,0x59},{0x0d,0xf2},{0x0e,0xf0},{0x0f,0x50},{0x10,0xb2},{0x11,0x00},{0x12,0x30},{0x13,0x80},
+            {0x14,0x00},{0x15,0x00},{0x17,0x00},{0x1a,0x00},{0x1b,0x00},{0x1c,0xaa},{0x1d,0xaa},{0x1e,0x20},
+            {0x1f,0xaa},{0x20,0x00},{0x38,0x40},{0x39,0x10},{0x3b,0x90},{0x51,0xb0},{0x52,0x89},{0x53,0xb3},
+            {0x5a,0x2d},{0x5b,0xd3},{0x85,0x69},{0x87,0x00},{0x8d,0x00},{0x8e,0x00},{0xa3,0x11},{0xa4,0x00},
+            {0xa5,0x40},{0xa6,0x04}
+        };
+        for (auto& kv : seq) WriteDemod4(kv[0], kv[1]);
+    }
+
+    void InitIsdbsTuner() {
+        WriteTuner4(0x09, 0x03);
+        { uint8_t d[] = {0xfe,0xc0,0x06,0x2a,0xe8,0x84}; WriteUnit4_Tuner(d, 6); }
+        { uint8_t d[] = {0xfe,0xc0,0x0a,0x20,0x78,0x1e,0x0a}; WriteUnit4_Tuner(d, 7); }
+        { uint8_t d[] = {0xfe,0xc0,0x0f,0x08,0x0f}; WriteUnit4_Tuner(d, 5); }
+        { uint8_t d[] = {0xfe,0xc0,0x18,0x40}; WriteUnit4_Tuner(d, 4); }
+        Sleep(10);
+    }
+
+    void EnableISDBS(bool enable) {
+        if (m_isdbsMode == (enable ? 1 : 0)) return;
+        if (enable) {
+            WriteDemod(0x0f, 0x1c);
+            WriteDemod(0x1c, 0x33);
+            WriteDemod(0x1e, 0xaa);
+            WriteDemod(0x1f, 0xa8);
+            WriteDemod4(0x1e, 0x20);
+            WriteDemod4(0x1c, 0x2a);
+            WriteDemod4(0x1f, 0x88);
+            WriteTuner4(0x04, 0x00);
+            WriteDemod(0x03, 0x90);
+            WriteTuner5(0x0f, 0x00);
+            WriteTuner5(0x01, 0x00);
+            { uint8_t d[] = {0xfe,0xc0,0x02,0x00,0x00}; WriteUnit4_Tuner(d, 5); }
+            WriteTuner4(0x19, 0x60);
+            WriteTuner4(0x20, 0x00);
+            WriteTuner4(0x0e, 0x6f);
+            WriteDemod4(0x17, 0x00);
+            m_isdbsMode = 1;
+        } else {
+            WriteDemod(0x0f, 0x34);
+            WriteDemod(0x1c, 0x28);
+            WriteDemod(0x1e, 0xa2);
+            WriteDemod(0x1f, 0x08);
+            WriteDemod4(0x1c, 0xaa);
+            WriteDemod4(0x1e, 0x20);
+            WriteDemod4(0x1f, 0xaa);
+            WriteTuner4(0x04, 0x40);
+            WriteDemod4(0x17, 0x01);
+            WriteTuner4(0x0e, 0x2f);
+            WriteTuner4(0x16, 0x00);
+            { uint8_t d[] = {0xfe,0xc0,0x02,0x0c,0xf6}; WriteUnit4_Tuner(d, 5); }
+            WriteTuner4(0x19, 0x40);
+            WriteTuner4(0x20, 0x08);
+            WriteDemod(0x03, 0x00);
+            m_isdbsMode = 0;
+        }
+    }
+
+    void SetIsdbsFrequency(uint32_t freqKhz, uint16_t tsid) {
+        // IF = freqKhz - 10678000 kHz, in MHz (1040..2060)
+        uint32_t ifMhz = (freqKhz > 10678000u) ? ((freqKhz - 10678000u + 500u) / 1000u) : 1049u;
+        WriteDemod4(0x90, (uint8_t)(tsid & 0xFF));
+        WriteDemod4(0x8f, (uint8_t)((tsid >> 8) & 0xFF));
+
+        uint8_t bl = 0x00;
+        if (ifMhz >= 1600) bl = 0x70;
+        else if (ifMhz >= 1500) bl = 0x60;
+        else if (ifMhz >= 1400) bl = 0x50;
+        else if (ifMhz >= 1200) bl = 0x40;
+        else if (ifMhz >= 1100) bl = 0x20;
+
+        uint8_t al = 0x00;
+        uint16_t mult = 1;
+        if (ifMhz < 1075) { mult = 2; al = 0x08; }
+        uint16_t w = (uint16_t)(mult * ifMhz);
+        uint8_t d7[7] = { 0xfe, 0xc0, 0x00, (uint8_t)(w >> 8), (uint8_t)(w & 0xFF), bl, al };
+        WriteUnit4_Tuner(d7, 7);
+        uint8_t d4[4] = { 0xfe, 0xc0, 0x02, (uint8_t)(bl | 0x02) };
+        WriteUnit4_Tuner(d4, 4);
+        WriteDemod4(0x03, 0x01);
+    }
 
     bool InitHardware() {
         if (!GPIOWritePin(0, 0)) return false;
@@ -988,7 +1233,25 @@ private:
 
         uint8_t openBuf[9] = {};
         *(uint32_t*)(openBuf + 1) = sessionId;
-        if (!SendCommand11(9, 1, 2, openBuf, 9) || *(uint32_t*)(openBuf + 5) != 0) return false;
+        if (!SendCommand11(9, 1, 2, openBuf, 9) || *(uint32_t*)(openBuf + 5) != 0) {
+            // Kick WatchDogInit (cs=6), then full CloseSession + IVDRM_Init + OpenSession
+            uint8_t wdInit[12] = {};
+            *(uint32_t*)(wdInit + 0) = 0x00000007;
+            *(uint64_t*)(wdInit + 4) = 1;
+            SendCommand11(9, 1, 6, wdInit, 12);
+            for (uint32_t sid : { 0u, 1u }) {
+                uint8_t closeBuf[9] = {};
+                *(uint32_t*)(closeBuf + 1) = sid;
+                SendCommand11(9, 1, 5, closeBuf, 9);
+            }
+            z = 0;
+            SendCommand11(9, 1, 0, &z, 1);
+            initResp = 0;
+            SendCommand11(9, 0x81, 1, &initResp, 4);
+            memset(openBuf, 0, sizeof(openBuf));
+            *(uint32_t*)(openBuf + 1) = sessionId;
+            if (!SendCommand11(9, 1, 2, openBuf, 9) || *(uint32_t*)(openBuf + 5) != 0) return false;
+        }
 
         uint8_t expA[16] = {};
         BCryptGenRandom(nullptr, expA, 16, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
@@ -1071,7 +1334,7 @@ private:
         uint8_t info[262] = {};
         info[8] = 1; info[16] = 8; info[17] = 1; info[24] = 1;
         SendCommand11(9, 1, 30, info, 262);
-        if (st == 2) return; // Card already initialized & ready
+        if (st != 0) return; // Only send ARIB INT (0x30) on cold boot (status==0); re-sending when status!=0 stalls unit=9
 
         // Drain any leftover B-CAS events
         for (int d = 0; d < 4; d++) {
@@ -1104,7 +1367,7 @@ private:
         }
     }
 
-    void PrepareStreamAndTuner() {
+    void PrepareUnit8Only() {
         uint8_t probeBuf[4] = { 0x00, 0x00, 0x01, 0x01 };
         uint8_t stopVal = 0, acqVal = 1, pauseVal = 2;
         SendCommand11(8, 1, 3, &acqVal, 1);
@@ -1116,6 +1379,10 @@ private:
 
         uint8_t u9buf[8] = {};
         SendCommand11(9, 1, 22, u9buf, 8);
+    }
+
+    void PrepareStreamAndTuner() {
+        PrepareUnit8Only();
 
         WriteDemod(0x0f, 0x34);
         WriteDemod(0x1c, 0x28);
@@ -1141,6 +1408,8 @@ private:
         };
         for (auto& kv : tinit) WriteTuner5(kv[0], kv[1]);
         WriteDemod(0x03, 0x00);
+        m_isdbsMode = 0;
+        m_isdbsInitDone = false;
     }
 
     void PushTsChunk(std::vector<uint8_t>&& chunk) {
@@ -1154,10 +1423,22 @@ private:
         LeaveCriticalSection(&m_bufCs);
     }
 
+    void PushRawChunk(const uint8_t* data, size_t len) {
+        if (!len) return;
+        std::vector<uint8_t> raw(data, data + len);
+        EnterCriticalSection(&m_rawCs);
+        while (m_rawQueue.size() >= MAX_QUEUE_CHUNKS) {
+            m_rawQueue.pop_front();
+        }
+        m_rawQueue.push_back(std::move(raw));
+        SetEvent(m_hRawEvent);
+        LeaveCriticalSection(&m_rawCs);
+    }
+
     static DWORD WINAPI ReaderThreadProc(LPVOID param) {
         CBonDriverGVMVPVZ* self = (CBonDriverGVMVPVZ*)param;
-        const int NUM_URB = 8;
-        const int URB_SZ = 32768;
+        const int NUM_URB = 16;
+        const int URB_SZ = 65536;
         void* ctx[NUM_URB] = {};
         uint8_t* tsBuf[NUM_URB] = {};
         for (int i = 0; i < NUM_URB; i++) {
@@ -1168,74 +1449,27 @@ private:
             }
         }
 
-        AesCbcCtx sessAes, tsAes;
-        sessAes.SetKey(self->m_sessionKey);
-        uint8_t tsIv[16] = {}, zeroIv[16] = {};
-        bool hasTsKey = false;
-        std::vector<uint8_t> carry;
-        carry.reserve(URB_SZ * 2);
-        std::vector<uint8_t> outChunk;
-        outChunk.reserve(URB_SZ);
-
         int cur = 0;
         bool loggedFirst = false;
+        auto reapFn = g_usb.usb_reap_async_nocancel ? g_usb.usb_reap_async_nocancel : g_usb.usb_reap_async;
         while (!InterlockedCompareExchange(&self->m_readerStop, 0, 0)) {
             if (!ctx[cur]) { Sleep(10); cur = (cur + 1) % NUM_URB; continue; }
-            int rr = g_usb.usb_reap_async(ctx[cur], 50);
+            int rr = reapFn(ctx[cur], 50);
             if (rr > 0) {
                 if (!loggedFirst && self->m_debug) {
                     loggedFirst = true;
                     fprintf(stderr, "[VZ] EP83 first read %d B\n", rr);
                     fflush(stderr);
                 }
-                carry.insert(carry.end(), tsBuf[cur], tsBuf[cur] + rr);
+                self->PushRawChunk(tsBuf[cur], (size_t)rr);
                 g_usb.usb_submit_async(ctx[cur], (char*)tsBuf[cur], URB_SZ);
-
-                outChunk.clear();
-                size_t pos = 0;
-                while (pos + 188 <= carry.size()) {
-                    if (carry[pos] != 0x47) { pos++; continue; }
-                    uint8_t* pkt = &carry[pos];
-                    uint8_t tsc = (pkt[3] >> 6) & 3;
-                    uint16_t pid = ((pkt[1] & 0x1F) << 8) | pkt[2];
-                    uint8_t afc = pkt[3] & 0x30;
-
-                    if ((tsc == 1 || tsc == 2) && pid == 0x0000 && afc == 0x20) {
-                        uint8_t dec[176] = {};
-                        if (sessAes.Decrypt(zeroIv, pkt + 4, dec, 176) &&
-                            memcmp(dec + 0x20, "FORIVFROMNXP", 12) == 0) {
-                            memcpy(tsIv, dec + 0x00, 16);
-                            tsAes.SetKey(dec + 0x10);
-                            hasTsKey = true;
-                            if (self->m_debug) {
-                                fprintf(stderr, "[VZ] TS key rotated (tsc=%u)\n", tsc);
-                                fflush(stderr);
-                            }
-                        }
-                    } else if (tsc == 3 && hasTsKey) {
-                        tsAes.Decrypt(tsIv, pkt + 4, pkt + 4, 176);
-                        pkt[3] &= 0x3F;
-                        if (pid != 0x1FFF) {
-                            outChunk.insert(outChunk.end(), pkt, pkt + 188);
-                        }
-                    } else if (tsc == 0 && pid != 0x1FFF) {
-                        outChunk.insert(outChunk.end(), pkt, pkt + 188);
-                    }
-                    pos += 188;
-                }
-                if (pos > 0) carry.erase(carry.begin(), carry.begin() + pos);
-                if (!outChunk.empty()) {
-                    std::vector<uint8_t> toSend;
-                    toSend.swap(outChunk);
-                    outChunk.reserve(URB_SZ);
-                    self->PushTsChunk(std::move(toSend));
-                }
+                cur = (cur + 1) % NUM_URB;
             } else if (rr == -116) {
-                // timeout: URB still pending
+                // URB still pending: do NOT skip cur (USB bulk IN completes in FIFO order!)
             } else {
                 g_usb.usb_submit_async(ctx[cur], (char*)tsBuf[cur], URB_SZ);
+                cur = (cur + 1) % NUM_URB;
             }
-            cur = (cur + 1) % NUM_URB;
         }
 
         for (int i = 0; i < NUM_URB; i++) {
@@ -1249,6 +1483,86 @@ private:
         return 0;
     }
 
+    static DWORD WINAPI DecryptThreadProc(LPVOID param) {
+        CBonDriverGVMVPVZ* self = (CBonDriverGVMVPVZ*)param;
+        AesCbcCtx sessAes, tsAes;
+        LONG curGen = -1;
+        uint8_t tsIv[16] = {}, zeroIv[16] = {};
+        bool hasTsKey = false;
+        std::vector<uint8_t> work;
+        work.reserve(131072);
+        std::vector<uint8_t> outChunk;
+        outChunk.reserve(65536);
+
+        while (!InterlockedCompareExchange(&self->m_readerStop, 0, 0)) {
+            LONG gen = InterlockedCompareExchange(&self->m_sessionKeyGen, 0, 0);
+            if (gen != curGen) {
+                curGen = gen;
+                sessAes.SetKey(self->m_sessionKey);
+                hasTsKey = false;
+                work.clear();
+            }
+            std::vector<uint8_t> raw;
+            EnterCriticalSection(&self->m_rawCs);
+            if (!self->m_rawQueue.empty()) {
+                raw = std::move(self->m_rawQueue.front());
+                self->m_rawQueue.pop_front();
+            }
+            LeaveCriticalSection(&self->m_rawCs);
+
+            if (raw.empty()) {
+                WaitForSingleObject(self->m_hRawEvent, 30);
+                continue;
+            }
+
+            work.insert(work.end(), raw.begin(), raw.end());
+            outChunk.clear();
+            size_t pos = 0;
+            while (pos + 188 <= work.size()) {
+                if (work[pos] != 0x47) { pos++; continue; }
+                uint8_t* pkt = &work[pos];
+                uint8_t tsc = (pkt[3] >> 6) & 3;
+                uint16_t pid = ((pkt[1] & 0x1F) << 8) | pkt[2];
+                uint8_t afc = pkt[3] & 0x30;
+
+                if ((tsc == 1 || tsc == 2) && pid == 0x0000 && afc == 0x20) {
+                    uint8_t dec[176] = {};
+                    if (sessAes.Decrypt(zeroIv, pkt + 4, dec, 176) &&
+                        memcmp(dec + 0x20, "FORIVFROMNXP", 12) == 0) {
+                        memcpy(tsIv, dec + 0x00, 16);
+                        tsAes.SetKey(dec + 0x10);
+                        hasTsKey = true;
+                        if (self->m_debug) {
+                            fprintf(stderr, "[VZ] TS key rotated (tsc=%u)\n", tsc);
+                            fflush(stderr);
+                        }
+                    }
+                } else if (tsc == 3 && hasTsKey) {
+                    tsAes.Decrypt(tsIv, pkt + 4, pkt + 4, 176);
+                    pkt[3] &= 0x3F;
+                    if (pid != 0x1FFF) {
+                        outChunk.insert(outChunk.end(), pkt, pkt + 188);
+                    }
+                } else if (tsc == 0 && pid != 0x1FFF) {
+                    outChunk.insert(outChunk.end(), pkt, pkt + 188);
+                }
+                pos += 188;
+            }
+            if (pos > 0) {
+                size_t rem = work.size() - pos;
+                if (rem > 0) memmove(work.data(), work.data() + pos, rem);
+                work.resize(rem);
+            }
+            if (!outChunk.empty()) {
+                std::vector<uint8_t> toSend;
+                toSend.swap(outChunk);
+                outChunk.reserve(65536);
+                self->PushTsChunk(std::move(toSend));
+            }
+        }
+        return 0;
+    }
+
     void StopStreaming() {
         if (m_streaming) {
             // Stop Unit8 WHILE reader thread is still draining EP83 so EP81 never stalls
@@ -1258,11 +1572,19 @@ private:
             SendCommand11(8, 1, 3, &stopVal, 1);
             m_streaming = false;
         }
-        if (m_hReaderThread) {
+        if (m_hReaderThread || m_hDecryptThread) {
             InterlockedExchange(&m_readerStop, 1);
-            WaitForSingleObject(m_hReaderThread, 3000);
-            CloseHandle(m_hReaderThread);
-            m_hReaderThread = nullptr;
+            if (m_hRawEvent) SetEvent(m_hRawEvent);
+            if (m_hReaderThread) {
+                WaitForSingleObject(m_hReaderThread, 3000);
+                CloseHandle(m_hReaderThread);
+                m_hReaderThread = nullptr;
+            }
+            if (m_hDecryptThread) {
+                WaitForSingleObject(m_hDecryptThread, 3000);
+                CloseHandle(m_hDecryptThread);
+                m_hDecryptThread = nullptr;
+            }
         }
     }
 
